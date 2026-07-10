@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "muscriptor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Audio-to-MIDI transcription using a transformer language model"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,7 +23,7 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio :: Analysis",
 ]
 dependencies = [
-    "torch>=2.0,<2.7",
+    "torch>=2.0",
     "numpy>=1.24",
     "einops>=0.4",
     "mido>=1.3",

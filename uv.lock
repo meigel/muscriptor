@@ -531,7 +531,7 @@ wheels = [
 
 [[package]]
 name = "muscriptor"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "einops" },
@@ -566,7 +566,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.29" },
     { name = "safetensors", specifier = ">=0.4" },
     { name = "soundfile", specifier = ">=0.14.0" },
-    { name = "torch", specifier = ">=2.0,<2.7" },
+    { name = "torch", specifier = ">=2.0" },
     { name = "typer", specifier = ">=0.10" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.48.0" },
 ]
