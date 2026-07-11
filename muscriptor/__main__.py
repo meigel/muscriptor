@@ -1,3 +1,3 @@
-from muscriptor.main import main
+from muscriptor.launcher import main
 
 main()
