@@ -110,7 +110,7 @@ class LMModel(nn.Module):
         self.dim = dim
         self.cfg_coef = cfg_coef
         self.autocast = (
-            autocast if autocast is not None else TorchAutocast(enabled=True)
+            autocast if autocast is not None else TorchAutocast(enabled=False)
         )
 
         self.emb = ScaledEmbedding(

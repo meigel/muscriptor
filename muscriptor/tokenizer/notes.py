@@ -7,7 +7,7 @@ import os
 from collections import Counter
 from dataclasses import dataclass
 
-from mido import Message, MidiFile, MidiTrack, second2tick
+from mido import Message, MetaMessage, MidiFile, MidiTrack, second2tick
 
 DRUM_PROGRAM = 128
 MINIMUM_NOTE_DURATION_SEC = 0.01
@@ -262,11 +262,23 @@ def note_event2midi(
     velocity: int = 100,
     ticks_per_beat: int = 480,
     tempo: int = 500000,
+    program_names: dict[int, str] | None = None,
 ) -> MidiFile:
-    """Convert NoteEvent list to a MIDI file."""
-    midi = MidiFile(ticks_per_beat=ticks_per_beat, type=0)
-    track = MidiTrack()
-    midi.tracks.append(track)
+    """Convert NoteEvent list to a type-1 (multi-track) MIDI file.
+
+    Each program gets its own named track so DAWs that split imports by
+    track (e.g. Ableton, which ignores channels/programs) keep the
+    instruments apart. Channel assignments match the earlier type-0 layout:
+    programs claim channels 0-8 then 10-15 in order of first appearance
+    (sharing 15 on overflow), drums live on channel 9.
+
+    `program_names` maps a program number (DRUM_PROGRAM for drums) to the
+    track name; unmapped programs fall back to "program <n>" / "drums".
+    """
+    midi = MidiFile(ticks_per_beat=ticks_per_beat, type=1)
+    meta_track = MidiTrack()
+    meta_track.append(MetaMessage("set_tempo", tempo=tempo, time=0))
+    midi.tracks.append(meta_track)
 
     drum_offset_events = []
     for ne in note_events:
@@ -283,49 +295,48 @@ def note_event2midi(
     note_events = list(note_events) + drum_offset_events
     sort_note_events(note_events)
 
+    program_names = program_names or {}
     program_to_channel: dict[int, int] = {}
     available_channels = list(range(0, 9)) + list(range(10, 16))
-    drums_initialized = False
+    tracks: dict[int, MidiTrack] = {}
+    track_ticks: dict[int, int] = {}
     current_tick = 0
     for ne in note_events:
         absolute_tick = round(second2tick(ne.time, ticks_per_beat, tempo))
-        if absolute_tick == current_tick:
-            delta_tick = 0
-        elif absolute_tick < current_tick:
+        if absolute_tick < current_tick:
             raise ValueError(
                 f"at ne.time {ne.time}, absolute_tick {absolute_tick} < current_tick {current_tick}"
             )
-        else:
-            delta_tick = absolute_tick - current_tick
-            current_tick += delta_tick
+        current_tick = absolute_tick
 
-        if ne.program in program_to_channel:
-            ne_channel = program_to_channel[ne.program]
-        elif ne.program == DRUM_PROGRAM or ne.is_drum:
-            ne_channel = 9
-            if not drums_initialized:
-                track.append(
-                    Message(
-                        "program_change", program=0, time=delta_tick, channel=ne_channel
-                    )
-                )
-                delta_tick = 0
-                drums_initialized = True
-        else:
-            try:
-                program_to_channel[ne.program] = available_channels.pop(0)
-            except IndexError:
-                program_to_channel[ne.program] = 15
-            ne_channel = program_to_channel[ne.program]
+        key = DRUM_PROGRAM if (ne.is_drum or ne.program == DRUM_PROGRAM) else ne.program
+        if key not in tracks:
+            track = MidiTrack()
+            midi.tracks.append(track)
+            tracks[key] = track
+            track_ticks[key] = 0
+            if key == DRUM_PROGRAM:
+                ne_channel = 9
+                name = program_names.get(key, "drums")
+                gm_program = 0
+            else:
+                try:
+                    ne_channel = available_channels.pop(0)
+                except IndexError:
+                    ne_channel = 15
+                name = program_names.get(key, f"program {key}")
+                gm_program = ne.program
+            program_to_channel[key] = ne_channel
+            track.append(MetaMessage("track_name", name=name, time=0))
             track.append(
                 Message(
-                    "program_change",
-                    program=ne.program,
-                    time=delta_tick,
-                    channel=ne_channel,
+                    "program_change", program=gm_program, time=0, channel=ne_channel
                 )
             )
-            delta_tick = 0
+        track = tracks[key]
+        ne_channel = program_to_channel[key]
+        delta_tick = absolute_tick - track_ticks[key]
+        track_ticks[key] = absolute_tick
 
         msg_note = "note_on" if ne.velocity > 0 else "note_off"
         msg_velocity = velocity if ne.velocity > 0 else 0
