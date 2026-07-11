@@ -115,7 +115,19 @@ def transcribe(
         typer.Option(
             "--batch-size",
             "-b",
-            help="Batch size for generation (default: 1 on CPU, 4 on GPU)",
+            help="Batch size for generation (default: 1 on CPU, 4 on GPU; ignored when decoding with parallel workers)",
+        ),
+    ] = None,
+    num_workers: Annotated[
+        int | None,
+        typer.Option(
+            "--num-workers",
+            "-w",
+            help=(
+                "Number of parallel single-threaded decode workers on CPU "
+                "(default: torch's thread count ≈ physical cores; 1 disables "
+                "parallel decoding; ignored on GPU)"
+            ),
         ),
     ] = None,
     strict_eos: Annotated[
@@ -220,6 +232,7 @@ def transcribe(
         batch_size=batch_size,
         no_eos_is_ok=not strict_eos,
         beam_size=beam_size,
+        num_workers=num_workers,
     )
 
     if format == OutputFormat.midi:

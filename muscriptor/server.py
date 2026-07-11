@@ -164,6 +164,9 @@ def create_app(model: TranscriptionModel, web_dir: str | Path | None = None) -> 
                 events: list[NoteStartEvent | NoteEndEvent] = []
                 # batch_size=1 so each chunk's notes stream out as soon as it is
                 # generated, instead of waiting for a whole batch of chunks.
+                # (On CPU, transcribe's default num_workers decodes chunks in
+                # parallel worker threads instead — batch_size is ignored and
+                # notes still stream strictly in chunk order.)
                 # no_eos_is_ok=True so one runaway chunk that never emits EOS only
                 # warns (and keeps its notes) instead of aborting the whole stream.
                 for ev in model.transcribe(
