@@ -4,13 +4,10 @@ import contextlib
 import io
 import json
 import math
-import queue
 import re
 import sys
-import threading
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -314,7 +311,6 @@ class TranscriptionModel:
         batch_size: int | None = None,
         no_eos_is_ok: bool = True,
         beam_size: int = 1,
-        num_workers: int | None = None,
     ) -> Iterator[NoteStartEvent | NoteEndEvent | ProgressEvent]:
         """Transcribe audio into a stream of note events.
 
@@ -327,20 +323,9 @@ class TranscriptionModel:
         anchors (``completed`` of ``total`` chunks): one up front with
         ``completed == 0``, then one as each chunk finishes. Consumers that
         only care about notes can ignore them.
-
-        ``num_workers`` controls CPU parallelism: chunks are decoded
-        concurrently by that many worker threads, each running torch
-        single-threaded (the per-step decode matmuls are too small to gain
-        from intra-op threading, so one chunk per core wins instead). The
-        default is torch's intra-op thread count (≈ physical cores) on CPU
-        and 1 on CUDA, where the batched sequential path is used and
-        ``num_workers`` is ignored. ``batch_size`` is ignored when decoding
-        in parallel.
         """
         if batch_size is None:
             batch_size = 4 if self._device.type == "cuda" else 1
-        if num_workers is None:
-            num_workers = 1 if self._device.type == "cuda" else torch.get_num_threads()
 
         # Exact names only here — the CLI resolves abbreviations before
         # calling in (resolve_instrument_names).
@@ -385,27 +370,12 @@ class TranscriptionModel:
 
         t_gen = time.perf_counter()
 
-        num_workers = max(1, min(num_workers, num_chunks))
-        use_parallel = num_workers > 1 and self._device.type != "cuda"
-        if use_parallel:
-            print(
-                f"[muscriptor] decoding with {num_workers} parallel worker(s), "
-                "torch intra-op threads set to 1",
-                file=sys.stderr,
-            )
-            token_stream = self._generate_token_stream_parallel(
-                all_conditions,
-                seek_times,
-                num_workers,
-                max_gen_len,
-                use_sampling,
-                temperature,
-                cfg_coef,
-                no_eos_is_ok,
-                beam_size,
-            )
-        else:
-            token_stream = self._generate_token_stream(
+        # Up-front anchor: tells consumers the total chunk count and gives them a
+        # timing baseline (t0) for the first chunk, before any tokens are gen'd.
+        yield ProgressEvent(completed=0, total=num_chunks)
+
+        yield from decode_model_tokens(
+            self._generate_token_stream(
                 all_conditions,
                 seek_times,
                 batch_size,
@@ -415,14 +385,7 @@ class TranscriptionModel:
                 cfg_coef,
                 no_eos_is_ok,
                 beam_size,
-            )
-
-        # Up-front anchor: tells consumers the total chunk count and gives them a
-        # timing baseline (t0) for the first chunk, before any tokens are gen'd.
-        yield ProgressEvent(completed=0, total=num_chunks)
-
-        yield from decode_model_tokens(
-            token_stream,
+            ),
             self._tokenizer._vocab,
             self._instrument_for_program,
             frame_rate=self._tokenizer.frame_rate,
@@ -537,123 +500,6 @@ class TranscriptionModel:
             yield ProgressEvent(completed=batch_start + n, total=num_chunks)
 
     # ------------------------------------------------------------------
-    def _generate_token_stream_parallel(
-        self,
-        all_conditions: list[ConditioningAttributes],
-        seek_times: list[float],
-        num_workers: int,
-        max_gen_len: int,
-        use_sampling: bool,
-        temperature: float,
-        cfg_coef: float,
-        no_eos_is_ok: bool,
-        beam_size: int = 1,
-    ) -> Iterator[int | ChunkBoundary | ProgressEvent]:
-        """Decode chunks concurrently; same stream contract as the sequential path.
-
-        One worker thread per chunk (at most ``num_workers`` in flight), each
-        running its own ``generate`` with torch's intra-op threading pinned to
-        1 so workers spread across cores instead of contending. This is safe
-        on the shared model because weights are read-only during generation
-        and all mutable decode state (KV caches, offsets) is allocated
-        per-call by ``init_states``.
-
-        The consumer side flushes chunks strictly in order — chunk 0 streams
-        live token-by-token while later chunks buffer in their queues — so
-        the "all of chunk N before any of chunk N+1" guarantee is preserved.
-        ProgressEvents reflect true completions (workers bump a shared
-        counter), emitted at chunk-flush boundaries so they stay monotonic.
-        """
-        eos_id = self._tokenizer.eos_id
-        num_chunks = len(seek_times)
-        done_sentinel = object()
-        queues: list[queue.SimpleQueue] = [
-            queue.SimpleQueue() for _ in range(num_chunks)
-        ]
-        cancelled = threading.Event()
-        completed = 0
-        completed_lock = threading.Lock()
-
-        def decode_chunk(chunk_index: int) -> None:
-            nonlocal completed
-            q = queues[chunk_index]
-            try:
-                got_eos = False
-                for step in self._model.generate(
-                    conditions=[all_conditions[chunk_index]],
-                    max_gen_len=max_gen_len,
-                    use_sampling=use_sampling,
-                    temp=temperature,
-                    top_k=0,
-                    top_p=0.0,
-                    cfg_coef=cfg_coef,
-                    early_stop_on_token=eos_id,
-                    beam_size=beam_size,
-                ):
-                    if cancelled.is_set():
-                        return
-                    tok = int(step[0])
-                    if tok == eos_id:
-                        got_eos = True
-                        break
-                    q.put(tok)
-                if not got_eos:
-                    msg = (
-                        f"chunk {chunk_index} (seek={seek_times[chunk_index]:.1f}s) "
-                        f"did not emit EOS within {max_gen_len} tokens"
-                    )
-                    if no_eos_is_ok:
-                        warnings.warn(msg, RuntimeWarning, stacklevel=2)
-                    else:
-                        raise RuntimeError(
-                            msg + " (this is only raised under --strict-eos)"
-                        )
-            except BaseException as exc:
-                q.put(exc)
-            finally:
-                with completed_lock:
-                    completed += 1
-                q.put(done_sentinel)
-
-        def boundary(chunk_index: int) -> ChunkBoundary:
-            next_seek_time = (
-                seek_times[chunk_index + 1] if chunk_index + 1 < num_chunks else None
-            )
-            return ChunkBoundary(seek_times[chunk_index], next_seek_time)
-
-        prev_threads = torch.get_num_threads()
-        torch.set_num_threads(1)
-        executor = ThreadPoolExecutor(
-            max_workers=num_workers, thread_name_prefix="muscriptor-decode"
-        )
-        try:
-            for i in range(num_chunks):
-                executor.submit(decode_chunk, i)
-            last_progress = 0
-            for i in range(num_chunks):
-                yield boundary(i)
-                q = queues[i]
-                while True:
-                    item = q.get()
-                    if item is done_sentinel:
-                        break
-                    if isinstance(item, BaseException):
-                        raise item
-                    yield item
-                with completed_lock:
-                    done_now = completed
-                if done_now > last_progress:
-                    last_progress = done_now
-                    yield ProgressEvent(completed=done_now, total=num_chunks)
-        finally:
-            # Also reached when the consumer closes the generator mid-stream
-            # (e.g. a preempted server request): signal workers so they stop
-            # within one decode step instead of finishing their chunks.
-            cancelled.set()
-            executor.shutdown(wait=True, cancel_futures=True)
-            torch.set_num_threads(prev_threads)
-
-    # ------------------------------------------------------------------
     def transcribe_to_midi(
         self,
         audio: str | Path | tuple[torch.Tensor, int],
@@ -664,7 +510,6 @@ class TranscriptionModel:
         batch_size: int | None = None,
         no_eos_is_ok: bool = True,
         beam_size: int = 1,
-        num_workers: int | None = None,
     ) -> bytes:
         """Same as :meth:`transcribe` but returns a MIDI file as bytes."""
         events = self.transcribe(
@@ -676,7 +521,6 @@ class TranscriptionModel:
             batch_size=batch_size,
             no_eos_is_ok=no_eos_is_ok,
             beam_size=beam_size,
-            num_workers=num_workers,
         )
         return self.events_to_midi_bytes(events)
 
