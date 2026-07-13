@@ -132,6 +132,18 @@ def transcribe(
             help="Beam search width (1 = greedy/sampling, ≥2 enables beam search)",
         ),
     ] = 1,
+    prelude_forcing: Annotated[
+        bool,
+        typer.Option(
+            "--prelude-forcing/--no-prelude-forcing",
+            help=(
+                "Teacher-force each chunk's tie prologue from the previous "
+                "chunk's still-sounding notes, so chunks can't restart with "
+                "the wrong instruments. Only active with batch size 1 "
+                "(automatically disabled otherwise)."
+            ),
+        ),
+    ] = True,
     auralize: Annotated[
         Path | None,
         typer.Option(
@@ -221,6 +233,7 @@ def transcribe(
         batch_size=batch_size,
         no_eos_is_ok=not strict_eos,
         beam_size=beam_size,
+        prelude_forcing=prelude_forcing,
     )
 
     if format == OutputFormat.midi:

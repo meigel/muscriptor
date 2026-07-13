@@ -165,6 +165,7 @@ class TranscriptionModel:
             batch_size: int | None = None,
             no_eos_is_ok: bool = True,
             beam_size: int = 1,
+            prelude_forcing: bool = True,
         ) -> Generator[NoteStartEvent | NoteEndEvent | ProgressEvent, None, None]:
         """Transcribe audio into a stream of note events.
 
@@ -199,6 +200,14 @@ class TranscriptionModel:
             beam_size: Beam search width. 1 (default) uses greedy decoding
                 (or sampling, with use_sampling=True); >= 2 enables beam
                 search, which is slower but can be more accurate.
+            prelude_forcing: If True (default), every chunk after the first
+                has its tie prologue — the tokens declaring which notes are
+                sustained from the previous chunk — teacher-forced from the
+                previous chunk's actually-unfinished notes, instead of
+                letting the model guess (which occasionally makes a chunk
+                restart with the wrong instruments). Requires chunks to be
+                generated strictly in order, so it is automatically disabled
+                when batch_size > 1.
 
         Returns:
             Generator of NoteStartEvent, NoteEndEvent and ProgressEvent
@@ -222,6 +231,7 @@ class TranscriptionModel:
             batch_size: int | None = None,
             no_eos_is_ok: bool = True,
             beam_size: int = 1,
+            prelude_forcing: bool = True,
         ) -> bytes:
         """Same as `transcribe`, but returns a MIDI file as bytes instead
         of a generator of events. Useful when you want to save the MIDI
@@ -256,6 +266,11 @@ muscriptor transcribe audio.wav --format jsonl -o -
 # more accurate)
 muscriptor transcribe audio.wav --sampling -t 0.8
 muscriptor transcribe audio.wav --beam-size 4
+
+# Notes sustained across a chunk boundary are teacher-forced into the next
+# chunk's prologue by default (batch size 1 only), so a chunk can't restart
+# them with the wrong instrument. Disable with:
+muscriptor transcribe audio.wav --no-prelude-forcing
 
 # Render a stereo check-mix of the result (left channel = original audio,
 # right channel = synthesized MIDI; requires fluidsynth on PATH)

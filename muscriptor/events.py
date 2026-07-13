@@ -206,3 +206,95 @@ def decode_model_tokens(
                 end_time=ev.start_time + MINIMUM_NOTE_DURATION_SEC, start_event=ev
             )
         open_notes.clear()
+
+
+class OpenNoteTracker:
+    """Mirror of :func:`decode_model_tokens`'s open-note bookkeeping.
+
+    The token generator feeds it the same ChunkBoundary markers and token
+    indices it sends downstream; :meth:`open_keys` then returns the
+    ``(program, pitch)`` pairs the decoder holds open at that point — exactly
+    the notes the next chunk's tie prologue must declare as sustained (see
+    ``MT3Tokenizer.tie_section_token_ids``). Kept next to
+    :func:`decode_model_tokens` because the two state machines must not drift:
+    every rule here (tie prologue, malformed chunks, the next_seek_time
+    window, retriggers) matches a branch of the decoder above.
+    """
+
+    def __init__(self, vocab: list[Event], frame_rate: int = 100):
+        self._vocab = vocab
+        self._frame_rate = frame_rate
+        self._open: set[tuple[int, int]] = set()
+        # Per-chunk state, reset at every ChunkBoundary.
+        self._next_seek_time: float | None = None
+        self._start_tick = 0
+        self._tick_state = 0
+        self._program: int | None = None
+        self._velocity: int | None = None
+        self._in_prologue = True
+        self._skip_rest = False
+        self._tie_set: set[tuple[int, int]] = set()
+        self._chunk_started = False
+
+    def feed(self, item: "int | ChunkBoundary") -> None:
+        if isinstance(item, ChunkBoundary):
+            # A chunk that never closed its tie prologue leaves the decoder
+            # with an empty tie set: every open note ends at its boundary.
+            if self._chunk_started and self._in_prologue:
+                self._open.clear()
+            self._next_seek_time = item.next_seek_time
+            self._start_tick = round(item.seek_time * self._frame_rate)
+            self._tick_state = self._start_tick
+            self._program = None
+            self._velocity = None
+            self._in_prologue = True
+            self._skip_rest = False
+            self._tie_set = set()
+            self._chunk_started = True
+            return
+
+        event = self._vocab[item]
+        etype = event.type
+
+        if self._in_prologue:
+            if etype == "tie":
+                self._in_prologue = False
+                self._velocity = None
+                self._open &= self._tie_set
+            elif etype == "shift":
+                # Malformed chunk: decoder closes everything and drops the rest.
+                self._in_prologue = False
+                self._skip_rest = True
+                self._open.clear()
+            elif etype == "program":
+                self._program = event.value
+            elif etype == "pitch" and self._program is not None:
+                self._tie_set.add((self._program, event.value))
+            return
+
+        if self._skip_rest:
+            return
+
+        if etype == "shift":
+            if event.value > 0:
+                self._tick_state = self._start_tick + event.value
+        elif etype == "program":
+            self._program = event.value
+        elif etype == "velocity":
+            self._velocity = event.value
+        elif etype == "pitch":
+            # Drums are instantaneous and never held open, so only pitch
+            # events move the open set.
+            if self._program is None or self._velocity is None:
+                return
+            time = self._tick_state / self._frame_rate
+            if self._next_seek_time is not None and time >= self._next_seek_time:
+                return
+            key = (self._program, event.value)
+            self._open.discard(key)
+            if self._velocity > 0:
+                self._open.add(key)
+
+    def open_keys(self) -> list[tuple[int, int]]:
+        """Sorted ``(program, pitch)`` pairs currently held open."""
+        return sorted(self._open)
