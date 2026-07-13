@@ -534,6 +534,7 @@ class TranscriptionModel:
         """
         notes: list[Note] = []
         open_notes: dict[int, Note] = {}
+        program_names: dict[int, str] = {}
         for ev in events:
             if isinstance(ev, ProgressEvent):
                 continue
@@ -544,6 +545,7 @@ class TranscriptionModel:
                     if is_drum
                     else self._program_for_instrument(ev.instrument)
                 )
+                program_names[program] = ev.instrument.replace("_", " ")
                 note = Note(
                     is_drum=is_drum,
                     program=program,
@@ -561,7 +563,7 @@ class TranscriptionModel:
         # don't drift from earlier reference outputs.
         notes = validate_notes(notes, fix=True)
         notes = trim_overlapping_notes(notes, sort=True)
-        midi = notes_to_midi(notes)
+        midi = notes_to_midi(notes, program_names=program_names)
         buf = io.BytesIO()
         midi.save(file=buf)
         return buf.getvalue()
