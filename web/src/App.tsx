@@ -22,10 +22,7 @@ import { ProgressEstimator, formatClock } from "./progress";
 
 type Screen = "welcome" | "transcribe";
 
-// Bundled demo track (web/public/headache_by_lost_deposit_1min.mp3) plus a
-// sensible conditioning guess — it's a rock recording, so guitars, bass,
-// drums, and vocals. The short clip (1:12, fading out from 1:02) keeps the
-// demo quick.
+// The song is Headache by Lost Deposit. ig: @lostdeposit
 const EXAMPLE = {
   url: "/headache_by_lost_deposit_1min.mp3",
   filename: "Lost Deposit - Headache (example track)",
@@ -139,12 +136,6 @@ export function App() {
   async function useExample() {
     const resp = await fetch(EXAMPLE.url);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    // The vite dev server answers missing files with index.html (SPA
-    // fallback), a 200 — without this check that HTML would be uploaded as
-    // the "example track" and die in the audio decoder.
-    const contentType = resp.headers.get("content-type") ?? "";
-    if (contentType.includes("text/html"))
-      throw new Error(`${EXAMPLE.url} is missing (got HTML instead of audio)`);
     const blob = await resp.blob();
     const file = new File([blob], EXAMPLE.filename, { type: "audio/mpeg" });
     setCondSelected(new Set(EXAMPLE.conditioning));
