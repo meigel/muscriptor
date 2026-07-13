@@ -52,6 +52,14 @@ const GM_PROGRAM: Record<string, number> = {
   synth_pad: 89,
 };
 
+/**
+ * Every instrument id the backend can emit, in its canonical order (mirrors
+ * MT3_FULL_PLUS_GROUP_NAMES in muscriptor/tokenizer/mt3.py). Position in this
+ * list is what gives each instrument its fixed piano-roll color, so the order
+ * must stay stable.
+ */
+export const INSTRUMENT_ORDER: string[] = [...Object.keys(GM_PROGRAM), "drums"];
+
 /** Velocity used for every synthesized note. */
 const NOTE_VELOCITY = 100;
 
