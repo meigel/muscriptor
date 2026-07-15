@@ -360,8 +360,22 @@ def transcribe(
     )
 
     if format == OutputFormat.midi:
-        midi_bytes = model.transcribe_to_midi(
-            **kwargs,
+        # Collect events, showing progress along the way
+        note_events: list = []
+        for ev in model.transcribe(**kwargs):
+            if isinstance(ev, ProgressEvent):
+                pct = 100 * ev.completed // ev.total if ev.total > 0 else 0
+                typer.echo(
+                    f"\r  Transcribing…  {ev.completed}/{ev.total} chunks  ({pct}%)",
+                    err=True,
+                    nl=False,
+                )
+            else:
+                note_events.append(ev)
+        typer.echo(err=True)  # final newline after progress
+
+        midi_bytes = model.events_to_midi_bytes(
+            iter(note_events),
             detect_tempo=detect_tempo,
             detect_key=detect_key,
             detect_chords=detect_chords or chords_file is not None,

@@ -266,6 +266,7 @@ def note_event2midi(
     key: str | None = None,
     key_mode: str | None = None,
     time_sig: tuple[int, int] | None = None,
+    chords: list[tuple[float, str]] | None = None,
 ) -> MidiFile:
     """Convert NoteEvent list to a type-1 (multi-track) MIDI file.
 
@@ -281,6 +282,9 @@ def note_event2midi(
     `key` and `key_mode` control the key signature meta event (e.g. "C",
     "major"). `time_sig` is (numerator, denominator) for a time signature
     meta event at the start of the track.
+
+    `chords` is an optional list of (time_in_seconds, label) pairs that
+    are written as marker events on a dedicated "Chords" track.
     """
     midi = MidiFile(ticks_per_beat=ticks_per_beat, type=1)
     meta_track = MidiTrack()
@@ -368,6 +372,24 @@ def note_event2midi(
                 channel=ne_channel,
             )
         )
+
+    # Add end-of-track markers to all existing tracks
+    for track in midi.tracks:
+        if not track or track[-1].type != "end_of_track":
+            track.append(MetaMessage("end_of_track", time=0))
+
+    # Chord track (marker events at each chord change)
+    if chords:
+        chord_track = MidiTrack()
+        chord_track.append(MetaMessage("track_name", name="Chords", time=0))
+        prev_tick = 0
+        for c_time, c_label in chords:
+            tick = round(second2tick(c_time, ticks_per_beat, tempo))
+            delta = tick - prev_tick
+            chord_track.append(MetaMessage("marker", text=c_label, time=delta))
+            prev_tick = tick
+        chord_track.append(MetaMessage("end_of_track", time=0))
+        midi.tracks.append(chord_track)
 
     if output_file is not None:
         midi.save(output_file)

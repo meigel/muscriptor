@@ -13,6 +13,7 @@ def notes_to_midi(
     key_mode: str | None = None,
     time_signature: tuple[int, int] | None = None,
     program_names: dict[int, str] | None = None,
+    chords: list[tuple[float, str]] | None = None,
 ) -> "MidiFile":
     """Convert a list of Note objects to a mido MidiFile.
 
@@ -24,6 +25,8 @@ def notes_to_midi(
         key_mode: 'major' or 'minor' for key signature meta event.
         time_signature: (numerator, denominator) for time signature meta event.
         program_names: Optional dict mapping program numbers to track names.
+        chords: Optional list of (time_in_seconds, chord_label) tuples to
+            embed as marker events on a dedicated "Chords" track.
     """
     from mido import MidiFile
 
@@ -38,6 +41,7 @@ def notes_to_midi(
         key_mode=key_mode,
         time_sig=time_signature,
         program_names=program_names,
+        chords=chords,
     )
 
 

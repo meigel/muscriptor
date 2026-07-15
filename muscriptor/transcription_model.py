@@ -601,6 +601,7 @@ class TranscriptionModel:
         bpm = 120
         key_name: str | None = None
         key_mode: str | None = None
+        _chord_data: list[tuple[float, str]] | None = None
 
         if manual_bpm is not None:
             bpm = float(manual_bpm)
@@ -631,6 +632,7 @@ class TranscriptionModel:
                 [n.onset for n in notes], bpm
             )
             chords = _detect_chords(notes, quarter_beats)
+            _chord_data = chords
             chord_txt = format_chord_progression(chords, bpm=bpm)
             self._log(f"Chord progression ({len(chords)} chords, {bpm:.0f} BPM):")
             for line in chord_txt.split("\n"):
@@ -674,6 +676,7 @@ class TranscriptionModel:
             tempo_bpm=int(round(bpm)),
             key=key_name,
             key_mode=key_mode,
+            chords=_chord_data,
         )
         buf = io.BytesIO()
         midi.save(file=buf)
