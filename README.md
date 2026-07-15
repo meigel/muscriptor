@@ -237,6 +237,9 @@ class TranscriptionModel:
 # Transcribe to MIDI (defaults to <audio_file>.mid next to the input)
 muscriptor transcribe audio.wav -o out.mid
 
+# Transcribe from a YouTube / any URL directly (requires yt-dlp)
+muscriptor transcribe --yt "https://youtube.com/watch?v=..."
+
 # Pick a model variant: small / medium / large (default: medium),
 # a local safetensors path, or an hf:// / http(s):// URL
 muscriptor transcribe audio.wav --model large

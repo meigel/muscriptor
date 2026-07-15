@@ -49,8 +49,17 @@ def _event_to_dict(ev: NoteStartEvent | NoteEndEvent) -> dict:
 @app.command()
 def transcribe(
     audio_file: Annotated[
-        Path, typer.Argument(help="Input audio file (wav, mp3, flac, …)")
-    ],
+        Path | None,
+        typer.Argument(help="Input audio file (wav, mp3, flac, …) — omit if --yt is used"),
+    ] = None,
+    yt_url: Annotated[
+        str | None,
+        typer.Option(
+            "--yt",
+            "--youtube",
+            help="Download audio from a YouTube/any URL and transcribe (requires yt-dlp)",
+        ),
+    ] = None,
     output: Annotated[
         Path | None,
         typer.Option(
@@ -243,6 +252,52 @@ def transcribe(
             )
             raise typer.Exit(1)
         typer.echo(f"Instruments: {', '.join(instrument_names)}", err=True)
+
+    # YouTube / URL download
+    import atexit
+    import tempfile
+
+    _yt_tmpdir: Path | None = None
+    if yt_url is not None:
+        try:
+            import yt_dlp  # noqa: F401
+        except ImportError:
+            typer.echo(
+                "Error: --yt requires yt-dlp. Install it with: pip install yt-dlp",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        _yt_tmpdir = Path(tempfile.mkdtemp(prefix="muscriptor_yt_"))
+        tmp_pattern = str(_yt_tmpdir / "audio.%(ext)s")
+        typer.echo(f"Downloading audio from {yt_url} …", err=True)
+        import subprocess
+
+        result = subprocess.run(
+            ["yt-dlp", "-x", "--audio-format", "wav", "-o", tmp_pattern, yt_url],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            typer.echo(f"yt-dlp failed:\n{result.stderr}", err=True)
+            raise typer.Exit(1)
+        wav_files = list(_yt_tmpdir.glob("*.wav"))
+        if not wav_files:
+            typer.echo("No WAV file produced by yt-dlp", err=True)
+            raise typer.Exit(1)
+        audio_file = wav_files[0]
+        sz = audio_file.stat().st_size
+        typer.echo(f"Downloaded {audio_file.name} ({sz / 1024 / 1024:.1f} MiB)", err=True)
+        import shutil
+
+        atexit.register(lambda d=_yt_tmpdir: shutil.rmtree(d, ignore_errors=True))
+
+    if audio_file is None:
+        typer.echo(
+            "Error: provide an audio file or --yt URL",
+            err=True,
+        )
+        raise typer.Exit(1)
 
     if not audio_file.exists():
         typer.echo(f"Error: file not found: {audio_file}", err=True)
