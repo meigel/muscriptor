@@ -532,6 +532,7 @@ class TranscriptionModel:
         quantize: bool = False,
         subdivision: int = 4,
         chords_file: str | Path | None = None,
+        manual_bpm: int | None = None,
     ) -> bytes:
         """Same as :meth:`transcribe` but returns a MIDI file as bytes.
 
@@ -555,6 +556,7 @@ class TranscriptionModel:
             quantize=quantize,
             subdivision=subdivision,
             chords_file=chords_file,
+            manual_bpm=manual_bpm,
         )
 
     def events_to_midi_bytes(
@@ -567,6 +569,7 @@ class TranscriptionModel:
         quantize: bool = False,
         subdivision: int = 4,
         chords_file: str | Path | None = None,
+        manual_bpm: int | None = None,
     ) -> bytes:
         """Reassemble Notes from a NoteStart/NoteEnd stream and serialize MIDI.
 
@@ -599,9 +602,13 @@ class TranscriptionModel:
         key_name: str | None = None
         key_mode: str | None = None
 
+        if manual_bpm is not None:
+            bpm = float(manual_bpm)
+            self._log(f"Using manual BPM: {bpm:.0f}")
+
         need_beats = detect_tempo or quantize or detect_chords or (chords_file is not None)
 
-        if need_beats:
+        if need_beats and manual_bpm is None:
             from muscriptor.utils.tempo import detect_tempo as _detect_tempo
 
             bpm = _detect_tempo(notes)

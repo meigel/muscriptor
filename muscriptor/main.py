@@ -17,7 +17,11 @@ from muscriptor.tokenizer.mt3 import (
 from muscriptor.transcription_model import TranscriptionModel
 from muscriptor.utils.download import ModelDownloadError
 
-app = typer.Typer(add_completion=False, help="muscriptor — audio-to-MIDI transcription")
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    help="muscriptor — audio-to-MIDI transcription",
+)
 
 
 def _load_model(model_path: str | None, device: str | None) -> TranscriptionModel:
@@ -237,6 +241,14 @@ def transcribe(
             ),
         ),
     ] = None,
+    bpm: Annotated[
+        int | None,
+        typer.Option(
+            "--bpm",
+            help="Manual BPM override (skips tempo detection). "
+            "Use --detect-tempo to re-enable detection.",
+        ),
+    ] = None,
 ) -> None:
     """Transcribe an audio file to MIDI."""
     instrument_names: list[str] | None = None
@@ -356,6 +368,7 @@ def transcribe(
             quantize=quantize,
             subdivision=subdivision,
             chords_file=chords_file,
+            manual_bpm=bpm,
         )
         if is_stdout:
             sys.stdout.buffer.write(midi_bytes)
