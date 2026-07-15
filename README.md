@@ -260,6 +260,15 @@ muscriptor transcribe audio.wav --beam-size 4
 # Render a stereo check-mix of the result (left channel = original audio,
 # right channel = synthesized MIDI; requires fluidsynth on PATH)
 muscriptor transcribe audio.wav -o out.mid --auralize check.wav
+
+# Inspect any MIDI file: structure, meta events, note counts
+muscriptor inspect song.mid
+
+# Compact summary per track
+muscriptor inspect song.mid --summary
+
+# Full dump including individual note_on/note_off events
+muscriptor inspect song.mid --notes
 ```
 
 ### Post-processing
@@ -301,7 +310,7 @@ muscriptor transcribe audio.wav \
 | `--quantize` | off | Snap all note onsets and offsets to the nearest grid subdivision; implies `--detect-tempo` |
 | `--subdivision` | 4 | Grid resolution for `--quantize`: 4 = 16th notes, 2 = 8th notes, 8 = 32nd notes |
 
-See `muscriptor transcribe --help` for the full list of options.
+See `muscriptor transcribe --help` and `muscriptor inspect --help` for the full list of options.
 
 ## Web UI
 
