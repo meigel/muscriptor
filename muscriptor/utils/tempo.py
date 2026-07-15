@@ -1,59 +1,87 @@
 """BPM detection and beat-grid generation from transcribed notes."""
 
+from __future__ import annotations
+
 from muscriptor.tokenizer.notes import Note
 
 _MIN_BPM = 40
 _MAX_BPM = 320
 
 
-def _grid_alignment_score(onsets: list[float], bpm: float) -> int:
-    """Count how many onsets land near the beat grid.
+def _best_phase(onsets: list[float], beat_dur: float, steps: int = 50) -> float:
+    """Find the phase offset (0..beat_dur) that maximises grid alignment.
 
-    Tolerance is proportional to beat duration (15%) so scoring is fair
-    across fast and slow tempos.
+    Scans *steps* evenly spaced phases.  The best one is returned so the
+    caller can use it to compute the true grid-alignment score.
     """
-    if bpm <= 0 or not onsets:
-        return 0
-    beat_dur = 60.0 / bpm
-    tol = beat_dur * 0.15
     start = min(onsets)
-    aligned = 0
+    best_phase = 0.0
+    best_count = -1
+    tol = beat_dur * 0.12
+    for s in range(steps):
+        phase = (beat_dur / steps) * s
+        count = 0
+        for o in onsets:
+            p = (o - start + phase) % beat_dur
+            if p < tol or p > beat_dur - tol:
+                count += 1
+        if count > best_count:
+            best_count = count
+            best_phase = phase
+    return best_phase
+
+
+def _grid_alignment_score(
+    onsets: list[float], beat_dur: float, phase: float
+) -> int:
+    """Number of onsets within 12 % of a grid line at the given phase."""
+    tol = beat_dur * 0.12
+    start = min(onsets)
+    n = 0
     for o in onsets:
-        phase = (o - start) % beat_dur
-        if phase < tol or phase > beat_dur - tol:
-            aligned += 1
-    return aligned
+        p = (o - start + phase) % beat_dur
+        if p < tol or p > beat_dur - tol:
+            n += 1
+    return n
 
 
-def _harmonic_clarity(onsets: list[float], bpm: float) -> float:
-    """Fraction of *all* onsets that fall on the beat grid (within 8 % of a
-    grid line).
+def _measure_clarity(
+    onsets: list[float], beat_dur: float, phase: float
+) -> float:
+    """Ratio of onsets on strong beats (1 & 3) to weak beats (2 & 4).
 
-    A high fraction means most notes articulate the pulse — the hallmark of
-    the *true* tempo.  Harmonics and sub-multiples get fewer on-beat
-    onsets because their grid lines are either too tight (fast) or too
-    sparse (slow) to catch the main rhythmic activity.
+    A high ratio means the tempo correctly captures the 4/4 measure
+    structure — onsets cluster on downbeats rather than off-beats.
     """
-    if bpm <= 0 or not onsets:
-        return 0.0
-    beat_dur = 60.0 / bpm
-    tol = beat_dur * 0.08
+    bar_dur = beat_dur * 4
+    tol = beat_dur * 0.10
     start = min(onsets)
-    on_beat = 0
+    strong = 0
+    weak = 0
     for o in onsets:
-        phase = (o - start) % beat_dur
-        if phase < tol or phase > beat_dur - tol:
-            on_beat += 1
-    return on_beat / len(onsets)
+        p = (o - start + phase) % bar_dur
+        # Beat 1 (downbeat): near 0 or near bar_dur
+        if p < tol or p > bar_dur - tol:
+            strong += 1
+        # Beat 3: near 2 × beat_dur
+        elif abs(p - 2 * beat_dur) < tol:
+            strong += 1
+        # Beats 2 and 4: near beat_dur or 3 × beat_dur
+        elif abs(p - beat_dur) < tol or abs(p - 3 * beat_dur) < tol:
+            weak += 1
+        # Off-grid — ignore (could be syncopation)
+    total = strong + weak
+    return strong / total if total > 0 else 0.0
 
 
 def detect_tempo(notes: list[Note]) -> float:
     """Estimate tempo in BPM from note onset times.
 
-    Generates candidate BPMs from consecutive inter-onset intervals (IOIs),
-    their sub/super harmonics, and adjacent IOI pair-sums (to catch swing).
-    Scores each candidate by grid alignment, then breaks ties by harmonic
-    clarity (the cleanest on-beat vs near-beat ratio wins).
+    Collects candidate BPMs from inter-onset intervals (IOIs) and their
+    harmonics.  For each candidate the optimal beat-grid phase is found,
+    then candidates are scored by (1) grid alignment and (2) measure
+    clarity (downbeat strength).  Candidates within 5 % of the best raw
+    alignment are compared by clarity; the clearest wins.
 
     Returns 120.0 if too few notes (< 3) to estimate.
     """
@@ -70,60 +98,61 @@ def detect_tempo(notes: list[Note]) -> float:
     if not io_is:
         return 120.0
 
-    # Collect candidate BPMs from each IOI and its harmonics
-    candidates: set[int] = set()
+    # Collect candidate BPMs as floats (no rounding — avoids drift)
+    candidates: set[float] = set()
     for ioi in io_is:
         base = 60.0 / ioi
         for mult in [0.125, 0.25, 0.5, 1, 2, 4, 8]:
             bpm = base * mult
             if _MIN_BPM <= bpm <= _MAX_BPM:
-                candidates.add(round(bpm))
+                candidates.add(bpm)
 
-    # Also add candidates from sums of adjacent IOI pairs (catches swing:
-    # 0.3 + 0.2 = 0.5s -> 120 BPM)
+    # Pair-sum candidates for swing
     for i in range(0, len(io_is) - 1, 2):
         pair_sum = io_is[i] + io_is[i + 1]
         base = 60.0 / pair_sum
         for mult in [0.25, 0.5, 1, 2, 4]:
             bpm = base * mult
             if _MIN_BPM <= bpm <= _MAX_BPM:
-                candidates.add(round(bpm))
+                candidates.add(bpm)
 
     if not candidates:
         return 120.0
 
-    # Score by grid alignment, then break ties by harmonic clarity,
-    # then prefer the slower tempo (fundamental over harmonic).
-    strongly_better = 1.05  # 5% better -> unambiguous winner
-    close_enough = 0.95     # within 5% -> compare clarity
+    # Rank by grid alignment (with optimal phase), then break ties by
+    # measure clarity.  Clarity must improve by more than 0.5 to override
+    # the preference for the slower (fundamental) tempo — this resolves
+    # harmonic ambiguity in perfectly regular onsets while preserving the
+    # clarity advantage for real music where accent patterns are richer.
+    strongly_better = 1.05
+    close_enough = 0.95
+    _CLARITY_THRESH = 0.5  # minimum improvement to override slower-preference
 
     best_bpm = 120.0
     best_raw = 0
     best_clarity = 0.0
 
-    for b in sorted(candidates):
-        raw = _grid_alignment_score(onsets, float(b))
-        if best_raw == 0:
-            best_raw, best_bpm, best_clarity = (
-                raw,
-                b,
-                _harmonic_clarity(onsets, float(b)),
-            )
-        elif raw >= best_raw * strongly_better:
-            # Clearly better -> take it
-            best_raw, best_bpm = raw, b
-            best_clarity = _harmonic_clarity(onsets, float(b))
-        elif raw >= best_raw * close_enough:
-            clarity = _harmonic_clarity(onsets, float(b))
-            if clarity > best_clarity + 0.01:
-                # Better clarity -> better tempo
-                best_raw, best_bpm, best_clarity = raw, b, clarity
-            elif abs(clarity - best_clarity) <= 0.01:
-                # Same clarity -> prefer slower (the fundamental)
-                if b < best_bpm:
-                    best_raw, best_bpm, best_clarity = raw, b, clarity
+    for bpm in sorted(candidates):
+        beat_dur = 60.0 / bpm
+        phase = _best_phase(onsets, beat_dur)
+        raw = _grid_alignment_score(onsets, beat_dur, phase)
 
-    return float(best_bpm)
+        if best_raw == 0:
+            best_raw, best_bpm = raw, bpm
+            best_clarity = _measure_clarity(onsets, beat_dur, phase)
+        elif raw >= best_raw * strongly_better:
+            best_raw, best_bpm = raw, bpm
+            best_clarity = _measure_clarity(onsets, beat_dur, phase)
+        elif raw >= best_raw * close_enough:
+            clarity = _measure_clarity(onsets, beat_dur, phase)
+            if clarity > best_clarity + _CLARITY_THRESH:
+                # Clearly stronger beat structure → good tempo
+                best_raw, best_bpm, best_clarity = raw, bpm, clarity
+            elif bpm < best_bpm:
+                # Otherwise prefer slower (fundamental pulse)
+                best_raw, best_bpm, best_clarity = raw, bpm, clarity
+
+    return round(best_bpm)
 
 
 def beat_times(
@@ -144,22 +173,9 @@ def beat_times(
     beat_dur = 60.0 / bpm
     start = min(onset_times)
     end = max(onset_times)
+    phase = _best_phase(sorted(onset_times), beat_dur)
 
-    # Scan phase to align grid with onsets
-    best_phase = 0.0
-    best_score = -1
-    for offset in range(int(beat_dur * 10)):
-        phase = offset / 10.0
-        score = sum(
-            1
-            for o in onset_times
-            if abs((o - start - phase) % beat_dur) < 0.03
-        )
-        if score > best_score:
-            best_score = score
-            best_phase = phase
-
-    grid_start = start + best_phase
+    grid_start = start + phase
     beats = []
     t = grid_start
     while t <= end + beat_dur:

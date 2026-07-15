@@ -274,7 +274,6 @@ def transcribe(
             text=True,
         )
         if result.returncode != 0:
-            # yt-dlp may have printed the filename on stdout
             typer.echo(f"yt-dlp failed:\n{result.stderr}", err=True)
             raise typer.Exit(1)
         # Find the downloaded WAV — yt-dlp prints the filename on stderr
@@ -284,14 +283,12 @@ def transcribe(
         if wav_match:
             wav_path = Path(wav_match.group(1))
         else:
-            # Fallback: glob for any new .wav
-            existing = set(Path.cwd().glob("*.wav"))
-            # Trigger a refresh (yt-dlp already ran)
-            new_wavs = [p for p in Path.cwd().glob("*.wav") if p not in existing]
-            if not new_wavs:
+            # Fallback: pick the most recent .wav in the current directory
+            wavs = sorted(Path.cwd().glob("*.wav"), key=lambda p: p.stat().st_mtime)
+            if not wavs:
                 typer.echo("Could not find downloaded WAV file", err=True)
                 raise typer.Exit(1)
-            wav_path = new_wavs[0]
+            wav_path = wavs[-1]
         audio_file = wav_path.resolve()
         typer.echo(f"Downloaded {audio_file.name}", err=True)
 
