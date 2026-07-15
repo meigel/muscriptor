@@ -274,7 +274,7 @@ class TranscriptionModel:
             weights_path: A size keyword (``"small"``/``"medium"``/``"large"``)
                 selecting a published HuggingFace variant, a local safetensors
                 path, an ``hf://`` or ``https://`` URL, or None.  If None, the
-                default ``medium`` variant is downloaded from HuggingFace.
+                default ``large`` variant is downloaded from HuggingFace.
                 Remote URLs are cached under ~/.cache/muscriptor/.
             device: Torch device to use.  Defaults to CUDA if available.
         """

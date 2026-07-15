@@ -240,7 +240,10 @@ muscriptor transcribe audio.wav -o out.mid
 # Transcribe from a YouTube / any URL directly (requires yt-dlp)
 muscriptor transcribe --yt "https://youtube.com/watch?v=..."
 
-# Pick a model variant: small / medium / large (default: medium),
+# Default to large unless another model is specified
+muscriptor transcribe audio.wav  # uses large by default
+
+# Pick a variant explicitly: small / medium / large (default: large),
 # a local safetensors path, or an hf:// / http(s):// URL
 muscriptor transcribe audio.wav --model large
 

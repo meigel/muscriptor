@@ -108,7 +108,7 @@ def transcribe(
             "--model",
             "-m",
             help=(
-                "Model size ('small', 'medium', 'large'; default: medium), "
+                "Model size ('small', 'medium', 'large'; default: large), "
                 "a local safetensors path, or an hf:// / http(s):// URL"
             ),
         ),
@@ -253,11 +253,7 @@ def transcribe(
             raise typer.Exit(1)
         typer.echo(f"Instruments: {', '.join(instrument_names)}", err=True)
 
-    # YouTube / URL download
-    import atexit
-    import tempfile
-
-    _yt_tmpdir: Path | None = None
+    # YouTube / URL download — WAV is saved to current directory
     if yt_url is not None:
         try:
             import yt_dlp  # noqa: F401
@@ -268,29 +264,36 @@ def transcribe(
             )
             raise typer.Exit(1)
 
-        _yt_tmpdir = Path(tempfile.mkdtemp(prefix="muscriptor_yt_"))
-        tmp_pattern = str(_yt_tmpdir / "audio.%(ext)s")
+        out_pattern = "%(title)s.%(ext)s"
         typer.echo(f"Downloading audio from {yt_url} …", err=True)
         import subprocess
 
         result = subprocess.run(
-            ["yt-dlp", "-x", "--audio-format", "wav", "-o", tmp_pattern, yt_url],
+            ["yt-dlp", "-x", "--audio-format", "wav", "-o", out_pattern, yt_url],
             capture_output=True,
             text=True,
         )
         if result.returncode != 0:
+            # yt-dlp may have printed the filename on stdout
             typer.echo(f"yt-dlp failed:\n{result.stderr}", err=True)
             raise typer.Exit(1)
-        wav_files = list(_yt_tmpdir.glob("*.wav"))
-        if not wav_files:
-            typer.echo("No WAV file produced by yt-dlp", err=True)
-            raise typer.Exit(1)
-        audio_file = wav_files[0]
-        sz = audio_file.stat().st_size
-        typer.echo(f"Downloaded {audio_file.name} ({sz / 1024 / 1024:.1f} MiB)", err=True)
-        import shutil
+        # Find the downloaded WAV — yt-dlp prints the filename on stderr
+        import re as _re
 
-        atexit.register(lambda d=_yt_tmpdir: shutil.rmtree(d, ignore_errors=True))
+        wav_match = _re.search(r"\[ExtractAudio\] Destination: (.+\.wav)", result.stderr)
+        if wav_match:
+            wav_path = Path(wav_match.group(1))
+        else:
+            # Fallback: glob for any new .wav
+            existing = set(Path.cwd().glob("*.wav"))
+            # Trigger a refresh (yt-dlp already ran)
+            new_wavs = [p for p in Path.cwd().glob("*.wav") if p not in existing]
+            if not new_wavs:
+                typer.echo("Could not find downloaded WAV file", err=True)
+                raise typer.Exit(1)
+            wav_path = new_wavs[0]
+        audio_file = wav_path.resolve()
+        typer.echo(f"Downloaded {audio_file.name}", err=True)
 
     if audio_file is None:
         typer.echo(
@@ -421,7 +424,7 @@ def serve(
             "--model",
             "-m",
             help=(
-                "Model size ('small', 'medium', 'large'; default: medium), "
+                "Model size ('small', 'medium', 'large'; default: large), "
                 "a local safetensors path, or an hf:// / http(s):// URL"
             ),
         ),
