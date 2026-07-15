@@ -262,6 +262,45 @@ muscriptor transcribe audio.wav --beam-size 4
 muscriptor transcribe audio.wav -o out.mid --auralize check.wav
 ```
 
+### Post-processing
+
+MuScriptor includes lightweight post-processing that runs after transcription — no extra model needed.
+
+```bash
+# Detect BPM and embed a set_tempo MIDI meta event
+muscriptor transcribe audio.wav --detect-tempo
+
+# Detect musical key and embed a key_signature MIDI meta event
+muscriptor transcribe audio.wav --detect-key
+
+# Detect chord labels at every beat (implies --detect-tempo)
+muscriptor transcribe audio.wav --detect-chords
+
+# Save the chord progression to a text file
+muscriptor transcribe audio.wav --detect-chords --chords-file chords.txt
+
+# Quantize note onsets/offsets to the nearest 16th-note grid
+muscriptor transcribe audio.wav --quantize
+
+# Quantize to 8th-note grid instead (--subdivision 2) or 32nd-note (8)
+muscriptor transcribe audio.wav --quantize --subdivision 2
+
+# Combine everything
+muscriptor transcribe audio.wav \
+  --detect-tempo --detect-key --detect-chords \
+  --quantize --subdivision 4 \
+  --chords-file chords.txt
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--detect-tempo` | off | Estimate BPM from note onsets (autocorrelation-based, range 40–320 BPM); writes a `set_tempo` MIDI meta event |
+| `--detect-key` | off | Estimate musical key via Krumhansl-Schmuckler profiling; writes a `key_signature` MIDI meta event |
+| `--detect-chords` | off | Infer chord labels at each beat using pitch-class templates; prints progression to stderr |
+| `--chords-file` | — | Save detected chord progression as a plain-text file (implies `--detect-chords`) |
+| `--quantize` | off | Snap all note onsets and offsets to the nearest grid subdivision; implies `--detect-tempo` |
+| `--subdivision` | 4 | Grid resolution for `--quantize`: 4 = 16th notes, 2 = 8th notes, 8 = 32nd notes |
+
 See `muscriptor transcribe --help` for the full list of options.
 
 ## Web UI

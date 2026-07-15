@@ -61,3 +61,54 @@ def test_save_midi_string_path():
         path = str(Path(tmpdir) / "out.mid")
         save_midi(notes, path)
         assert Path(path).exists()
+
+
+def test_notes_to_midi_with_meta_events():
+    """MIDI should contain set_tempo, key_signature, time_signature meta events."""
+    notes = _sample_notes()
+    midi = notes_to_midi(
+        notes,
+        tempo_bpm=120,
+        key="C",
+        key_mode="major",
+        time_signature=(4, 4),
+    )
+    track = midi.tracks[0]
+    meta_types = [msg.type for msg in track if msg.is_meta]
+    assert "set_tempo" in meta_types
+    assert "key_signature" in meta_types
+    assert "time_signature" in meta_types
+
+
+def test_notes_to_midi_key_signature_g_major():
+    """G major meta event key string should be 'G'."""
+    notes = _sample_notes()
+    midi = notes_to_midi(notes, key="G", key_mode="major")
+    for msg in midi.tracks[0]:
+        if msg.type == "key_signature":
+            assert msg.key == "G"
+            return
+    assert False, "no key_signature meta event found"
+
+
+def test_notes_to_midi_key_signature_a_minor():
+    """A minor meta event key string should be 'Am'."""
+    notes = _sample_notes()
+    midi = notes_to_midi(notes, key="A", key_mode="minor")
+    for msg in midi.tracks[0]:
+        if msg.type == "key_signature":
+            assert msg.key == "Am"
+            return
+    assert False, "no key_signature meta event found"
+
+
+def test_notes_to_midi_tempo_change():
+    """Tempo meta event should reflect the requested BPM."""
+    notes = _sample_notes()
+    midi = notes_to_midi(notes, tempo_bpm=90)
+    for msg in midi.tracks[0]:
+        if msg.type == "set_tempo":
+            expected_us = int(60_000_000 / 90)
+            assert msg.tempo == expected_us
+            return
+    assert False, "no set_tempo meta event found"

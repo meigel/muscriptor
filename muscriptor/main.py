@@ -166,6 +166,68 @@ def transcribe(
             ),
         ),
     ] = None,
+    detect_tempo: Annotated[
+        bool,
+        typer.Option(
+            "--detect-tempo",
+            help=(
+                "Estimate BPM from transcribed note onsets and write a "
+                "set_tempo MIDI meta event with the detected tempo."
+            ),
+        ),
+    ] = False,
+    detect_key: Annotated[
+        bool,
+        typer.Option(
+            "--detect-key",
+            help=(
+                "Estimate musical key (Krumhansl-Schmuckler algorithm) and "
+                "write a key_signature MIDI meta event."
+            ),
+        ),
+    ] = False,
+    detect_chords: Annotated[
+        bool,
+        typer.Option(
+            "--detect-chords",
+            help=(
+                "Detect chord labels at each beat and print the chord "
+                "progression to stderr. Implies --detect-tempo."
+            ),
+        ),
+    ] = False,
+    quantize: Annotated[
+        bool,
+        typer.Option(
+            "--quantize",
+            help=(
+                "Snap note onsets and offsets to the nearest grid "
+                "subdivision (16th notes by default). Implies "
+                "--detect-tempo so the grid matches the music."
+            ),
+        ),
+    ] = False,
+    subdivision: Annotated[
+        int,
+        typer.Option(
+            "--subdivision",
+            help=(
+                "Grid resolution for --quantize: 4 = 16th notes (default), "
+                "2 = eighth notes, 8 = 32nd notes. Only meaningful with "
+                "--quantize."
+            ),
+        ),
+    ] = 4,
+    chords_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--chords-file",
+            help=(
+                "Save detected chord progression as a text file. "
+                "Implies --detect-chords."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Transcribe an audio file to MIDI."""
     instrument_names: list[str] | None = None
@@ -224,7 +286,15 @@ def transcribe(
     )
 
     if format == OutputFormat.midi:
-        midi_bytes = model.transcribe_to_midi(**kwargs)
+        midi_bytes = model.transcribe_to_midi(
+            **kwargs,
+            detect_tempo=detect_tempo,
+            detect_key=detect_key,
+            detect_chords=detect_chords or chords_file is not None,
+            quantize=quantize,
+            subdivision=subdivision,
+            chords_file=chords_file,
+        )
         if is_stdout:
             sys.stdout.buffer.write(midi_bytes)
             sys.stdout.buffer.flush()
@@ -326,6 +396,79 @@ def list_instruments():
     """List the instrument group names accepted by --instruments."""
     for name in MT3_FULL_PLUS_GROUP_NAMES:
         typer.echo(name)
+
+
+@app.command()
+def inspect(
+    midi_file: Annotated[
+        Path,
+        typer.Argument(help="MIDI file to inspect", exists=True, dir_okay=False),
+    ],
+    notes: Annotated[
+        bool,
+        typer.Option("--notes", "-n", help="Show individual note events"),
+    ] = False,
+    summary: Annotated[
+        bool,
+        typer.Option(
+            "--summary", "-s", help="Show only a compact summary per track"
+        ),
+    ] = False,
+) -> None:
+    """Print a readable dump of a MIDI file's structure and events."""
+    import mido
+
+    mid = mido.MidiFile(midi_file)
+    typer.echo(f"File:   {midi_file}")
+    typer.echo(f"Format: {mid.type}")
+    typer.echo(f"Tracks: {len(mid.tracks)}")
+    typer.echo(f"Length: {mid.length:.1f}s")
+    typer.echo(f"PPQN:   {mid.ticks_per_beat}")
+    typer.echo()
+
+    for i, track in enumerate(mid.tracks):
+        note_ons = sum(
+            1 for e in track if e.type == "note_on" and e.velocity > 0
+        )
+        typer.echo(
+            f"── Track {i}: {track.name or '(unnamed)'}"
+            f"  ({len(track)} msgs, {note_ons} notes) ──"
+        )
+
+        if summary:
+            # One-line summary: count by message type
+            counts: dict[str, int] = {}
+            for msg in track:
+                if msg.is_meta:
+                    counts.setdefault(f"meta:{msg.type}", 0)
+                    counts[f"meta:{msg.type}"] += 1
+                else:
+                    counts[msg.type] = counts.get(msg.type, 0) + 1
+            parts = [f"{k}={v}" for k, v in sorted(counts.items())]
+            typer.echo("   " + ", ".join(parts))
+            continue
+
+        tick = 0
+        for msg in track:
+            tick += msg.time
+            if msg.is_meta:
+                if msg.type in (
+                    "track_name",
+                    "set_tempo",
+                    "key_signature",
+                    "time_signature",
+                    "end_of_track",
+                ):
+                    typer.echo(
+                        f"  @{tick:>8d}  [{msg.type}]  {msg}"
+                    )
+            elif notes and msg.type in ("note_on", "note_off"):
+                typer.echo(
+                    f"  @{tick:>8d}  {msg.type:<8s}"
+                    f"  note={msg.note:>3d}  vel={msg.velocity:>3d}"
+                    f"  ch={msg.channel}"
+                )
+        typer.echo()
 
 
 def main():

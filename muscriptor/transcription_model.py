@@ -68,7 +68,7 @@ def _timed(label: str, store: list[tuple[str, float]] | None = None):
 # architecture is then read from that repo's config.json (see _resolve_config).
 _HF_REPO_TEMPLATE = "hf://MuScriptor/muscriptor-{size}/model.safetensors"
 _MODEL_SIZES = ("small", "medium", "large")
-_DEFAULT_SIZE = "medium"
+_DEFAULT_SIZE = "large"
 
 
 def _resolve_source(weights_path: str | Path | None) -> str | Path:
@@ -525,8 +525,18 @@ class TranscriptionModel:
         batch_size: int | None = None,
         no_eos_is_ok: bool = True,
         beam_size: int = 1,
+        *,
+        detect_tempo: bool = False,
+        detect_key: bool = False,
+        detect_chords: bool = False,
+        quantize: bool = False,
+        subdivision: int = 4,
+        chords_file: str | Path | None = None,
     ) -> bytes:
-        """Same as :meth:`transcribe` but returns a MIDI file as bytes."""
+        """Same as :meth:`transcribe` but returns a MIDI file as bytes.
+
+        Post-processing flags are forwarded to :meth:`events_to_midi_bytes`.
+        """
         events = self.transcribe(
             audio,
             use_sampling=use_sampling,
@@ -537,15 +547,144 @@ class TranscriptionModel:
             no_eos_is_ok=no_eos_is_ok,
             beam_size=beam_size,
         )
-        return self.events_to_midi_bytes(events)
+        return self.events_to_midi_bytes(
+            events,
+            detect_tempo=detect_tempo,
+            detect_key=detect_key,
+            detect_chords=detect_chords,
+            quantize=quantize,
+            subdivision=subdivision,
+            chords_file=chords_file,
+        )
 
     def events_to_midi_bytes(
-        self, events: Iterator[NoteStartEvent | NoteEndEvent | ProgressEvent]
+        self,
+        events: Iterator[NoteStartEvent | NoteEndEvent | ProgressEvent],
+        *,
+        detect_tempo: bool = False,
+        detect_key: bool = False,
+        detect_chords: bool = False,
+        quantize: bool = False,
+        subdivision: int = 4,
+        chords_file: str | Path | None = None,
     ) -> bytes:
         """Reassemble Notes from a NoteStart/NoteEnd stream and serialize MIDI.
 
         Shared by :meth:`transcribe_to_midi` and the HTTP server, so the MIDI
         bytes are identical regardless of how the events were obtained.
+
+        Post-processing flags (all optional):
+
+        * ``detect_tempo`` — estimate BPM from detected onsets and write a
+          ``set_tempo`` meta event matching the actual music, instead of the
+          hardcoded 120 BPM default.
+        * ``detect_key`` — estimate key (Krumhansl-Schmuckler) and write a
+          ``key_signature`` meta event.
+        * ``detect_chords`` — detect chord labels at each beat and print the
+          chord progression to stderr. Implies ``detect_tempo``.
+        * ``quantize`` — snap note onsets/offsets to the nearest grid
+          subdivision (implied by the detected BPM).
+        * ``subdivision`` — grid resolution for quantization: e.g. 4 = 16th
+          notes (default), 8 = 32nd notes.
+        * ``chords_file`` — optional path to save chord progression text.
+
+        Need at least one post-processing flag to activate detect_tempo
+        (needed for beat grid).
+        """
+        notes, _program_names = self._events_to_notes(events)
+        notes = validate_notes(notes, fix=True)
+        notes = trim_overlapping_notes(notes, sort=True)
+
+        bpm = 120
+        key_name: str | None = None
+        key_mode: str | None = None
+
+        need_beats = detect_tempo or quantize or detect_chords or (chords_file is not None)
+
+        if need_beats:
+            from muscriptor.utils.tempo import detect_tempo as _detect_tempo
+
+            bpm = _detect_tempo(notes)
+            self._log(f"Detected tempo: {bpm:.0f} BPM")
+
+        if detect_key:
+            from muscriptor.utils.key import detect_key as _detect_key
+
+            key_name, key_mode = _detect_key(notes)
+            self._log(f"Detected key: {key_name} {key_mode}")
+
+        if detect_chords or chords_file is not None:
+            from muscriptor.utils.chords import (
+                detect_chords as _detect_chords,
+                format_chord_progression,
+            )
+            from muscriptor.utils.tempo import beat_times
+
+            quarter_beats = beat_times(
+                [n.onset for n in notes], bpm
+            )
+            chords = _detect_chords(notes, quarter_beats)
+            chord_txt = format_chord_progression(chords, bpm=bpm)
+            self._log(f"Chord progression ({len(chords)} chords, {bpm:.0f} BPM):")
+            for line in chord_txt.split("\n"):
+                self._log(f"  {line}")
+            if chords_file is not None:
+                path = Path(chords_file)
+                header = (
+                    f"MuScriptor chord transcript\n"
+                    f"Tempo: {bpm:.0f} BPM\n"
+                    f"Chords: {len(chords)}\n"
+                    f"{'─' * 40}\n"
+                )
+                path.write_text(header + chord_txt + "\n")
+                self._log(f"Chord transcript saved to {path}")
+
+        if quantize:
+            from muscriptor.utils.tempo import beat_times
+            from muscriptor.utils.quantize import quantize_notes
+
+            quarter_beats = beat_times(
+                [n.onset for n in notes], bpm
+            )
+            beat_dur = 60.0 / bpm
+            grid = sorted(
+                {
+                    b + i * beat_dur / subdivision
+                    for b in quarter_beats
+                    for i in range(subdivision)
+                }
+            )
+            n_before = len(notes)
+            notes = quantize_notes(notes, grid)
+            self._log(
+                f"Quantized {n_before} notes to {subdivision}-per-beat grid "
+                f"({bpm:.0f} BPM)"
+            )
+
+        midi = notes_to_midi(
+            notes,
+            program_names=_program_names,
+            tempo_bpm=int(round(bpm)),
+            key=key_name,
+            key_mode=key_mode,
+        )
+        buf = io.BytesIO()
+        midi.save(file=buf)
+        return buf.getvalue()
+
+    @staticmethod
+    def _log(msg: str) -> None:
+        """Print a log line to stderr (matching the [muscriptor] convention)."""
+        print(f"[muscriptor] {msg}", file=sys.stderr)
+
+    def _events_to_notes(
+        self,
+        events: Iterator[NoteStartEvent | NoteEndEvent | ProgressEvent],
+    ) -> tuple[list[Note], dict[int, str]]:
+        """Convert an event stream into (notes, program_names).
+
+        Shared between :meth:`events_to_midi_bytes` (which adds post-processing)
+        and any caller that wants raw note data.
         """
         notes: list[Note] = []
         open_notes: dict[int, Note] = {}
@@ -574,14 +713,7 @@ class TranscriptionModel:
                 note.offset = ev.end_time
                 notes.append(note)
 
-        # Match the legacy decoder's note-cleanup pass so the MIDI bytes
-        # don't drift from earlier reference outputs.
-        notes = validate_notes(notes, fix=True)
-        notes = trim_overlapping_notes(notes, sort=True)
-        midi = notes_to_midi(notes, program_names=program_names)
-        buf = io.BytesIO()
-        midi.save(file=buf)
-        return buf.getvalue()
+        return notes, program_names
 
     def _program_for_instrument(self, instrument: str) -> int:
         """Inverse of `_instrument_for_program` for non-drum instruments."""

@@ -263,6 +263,9 @@ def note_event2midi(
     ticks_per_beat: int = 480,
     tempo: int = 500000,
     program_names: dict[int, str] | None = None,
+    key: str | None = None,
+    key_mode: str | None = None,
+    time_sig: tuple[int, int] | None = None,
 ) -> MidiFile:
     """Convert NoteEvent list to a type-1 (multi-track) MIDI file.
 
@@ -274,10 +277,26 @@ def note_event2midi(
 
     `program_names` maps a program number (DRUM_PROGRAM for drums) to the
     track name; unmapped programs fall back to "program <n>" / "drums".
+
+    `key` and `key_mode` control the key signature meta event (e.g. "C",
+    "major"). `time_sig` is (numerator, denominator) for a time signature
+    meta event at the start of the track.
     """
     midi = MidiFile(ticks_per_beat=ticks_per_beat, type=1)
     meta_track = MidiTrack()
     meta_track.append(MetaMessage("set_tempo", tempo=tempo, time=0))
+    if time_sig is not None:
+        meta_track.append(
+            MetaMessage(
+                "time_signature",
+                numerator=time_sig[0],
+                denominator=time_sig[1],
+                time=0,
+            )
+        )
+    if key is not None and key_mode is not None:
+        key_str = f"{key}{'m' if key_mode == 'minor' else ''}"
+        meta_track.append(MetaMessage("key_signature", key=key_str, time=0))
     midi.tracks.append(meta_track)
 
     drum_offset_events = []
