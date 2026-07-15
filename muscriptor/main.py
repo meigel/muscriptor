@@ -264,7 +264,9 @@ def transcribe(
             )
             raise typer.Exit(1)
 
-        out_pattern = "%(title)s.%(ext)s"
+        outdir = Path.cwd() / "wav"
+        outdir.mkdir(exist_ok=True)
+        out_pattern = str(outdir / "%(title)s.%(ext)s")
         typer.echo(f"Downloading audio from {yt_url} …", err=True)
         import subprocess
 
@@ -283,8 +285,11 @@ def transcribe(
         if wav_match:
             wav_path = Path(wav_match.group(1))
         else:
-            # Fallback: pick the most recent .wav in the current directory
-            wavs = sorted(Path.cwd().glob("*.wav"), key=lambda p: p.stat().st_mtime)
+            # Fallback: pick the most recent .wav in the wav/ directory
+            wavs = sorted(
+                (Path.cwd() / "wav").glob("*.wav"),
+                key=lambda p: p.stat().st_mtime,
+            )
             if not wavs:
                 typer.echo("Could not find downloaded WAV file", err=True)
                 raise typer.Exit(1)
@@ -311,7 +316,9 @@ def transcribe(
             OutputFormat.json: ".json",
             OutputFormat.jsonl: ".jsonl",
         }[format]
-        output = audio_file.with_suffix(suffix)
+        outdir = Path("midi")
+        outdir.mkdir(exist_ok=True)
+        output = outdir / f"{audio_file.stem}{suffix}"
 
     _device = None if device == "auto" else device
 

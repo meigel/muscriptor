@@ -15,3 +15,5 @@ web/tsconfig.tsbuildinfo
 __pycache__
 .DS_Store
 .hermes/
+midi/
+wav/
