@@ -15,6 +15,8 @@ from muscriptor.tokenizer.notes import (
     trim_overlapping_notes,
 )
 from muscriptor.utils.beats import BeatGrid, Onsets, estimate_onset_delay, fit_tempo
+from muscriptor.utils.chords import chord_changes, chord_chart, chord_labels
+from muscriptor.utils.key import detect_key, midi_key_name
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +59,41 @@ class ExportOptions:
     # Drop the empty bars before the first note. The MIDI then no longer starts
     # where the audio does.
     trim_leading_bars: bool = False
+    # Write the detected key as a key signature.
+    detect_key: bool = False
+    # Write the detected chords as markers in the conductor track.
+    detect_chords: bool = False
 
     def __post_init__(self):
         if self.beat_scale <= 0 or not math.log2(self.beat_scale).is_integer():
             raise ValueError(
                 f"beat_scale must be a power of two, not {self.beat_scale}"
             )
+
+
+@dataclasses.dataclass
+class Harmony:
+    """What the key and chord detection found, filled in by `notes_to_midi`.
+
+    `key` is (tonic, mode) as `muscriptor.utils.key.detect_key` returns it, and
+    `chords` are (beat, label) pairs in the written score's beats, so they line
+    up with the ticks the labels are written at.
+    """
+
+    key: tuple[str, str] | None = None
+    chords: list[tuple[float, str]] = dataclasses.field(default_factory=list)
+
+    @property
+    def chart(self) -> str:
+        """The chord progression as a chord chart, or N.C. when there is none."""
+        return chord_chart(self.chords)
+
+
+def beat_range(notes: list[Note]) -> range:
+    """Whole beats spanned by `notes`, which are in beats from the start."""
+    if not notes:
+        return range(0)
+    return range(math.ceil(max(n.offset for n in notes)) + 1)
 
 
 def resolve_grid(
@@ -356,6 +387,7 @@ def notes_to_midi(
     program_names: dict[int, str] | None = None,
     beat_grid: BeatGrid | None = None,
     options: ExportOptions | None = None,
+    harmony: Harmony | None = None,
 ):
     """Convert a list of Note objects to a mido MidiFile.
 
@@ -374,6 +406,9 @@ def notes_to_midi(
     `options` corrects the grid and says how far to tidy the notes onto it; see
     ExportOptions. Quantizing needs a subdivision, which `resolve_grid` may not
     find; the notes are then written unquantized.
+
+    `harmony` is filled in with the detected key and chords when `options` asks
+    for them, so the caller can report them without redoing the analysis.
     """
     options = options or ExportOptions()
     grid = resolve_grid(beat_grid, options, [n.onset for n in notes])
@@ -403,6 +438,23 @@ def notes_to_midi(
         timeline = timeline.shifted(-empty)
         notes = shifted_notes(notes, -empty)
 
+    # Detected last, on the notes as they are written: the chords belong to the
+    # score's beats, which is where the markers are put.
+    key = None
+    markers = None
+    if options.detect_key or options.detect_chords:
+        detected = Harmony() if harmony is None else harmony
+        if options.detect_key:
+            detected.key = detect_key(notes)
+            key = midi_key_name(*detected.key)
+        if options.detect_chords:
+            detected.chords = chord_changes(
+                chord_labels(notes, list(beat_range(notes)))
+            )
+            markers = [
+                (round(beat * TICKS_PER_BEAT), label) for beat, label in detected.chords
+            ]
+
     return note_event2midi(
         note2note_event(notes),
         output_file=None,
@@ -416,6 +468,8 @@ def notes_to_midi(
         to_tick=lambda beats: round(beats * TICKS_PER_BEAT),
         tempo_changes=timeline.tempo_changes(TICKS_PER_BEAT),
         drum_length=DRUM_HIT_BEATS,
+        key_signature=key,
+        markers=markers,
     )
 
 

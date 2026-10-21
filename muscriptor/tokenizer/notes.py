@@ -292,6 +292,8 @@ def note_event2midi(
     to_tick: Callable[[float], int] | None = None,
     tempo_changes: list[tuple[int, int]] | None = None,
     drum_length: float = 0.01,
+    key_signature: str | None = None,
+    markers: list[tuple[int, str]] | None = None,
 ) -> MidiFile:
     """Convert NoteEvent list to a type-1 (multi-track) MIDI file.
 
@@ -305,6 +307,10 @@ def note_event2midi(
     track name; unmapped programs fall back to "program <n>" / "drums".
 
     `beats_per_bar` writes a time signature (denominator 4).
+    `key_signature` writes a key signature: a key name such as 'Eb' or 'Cm', as
+    muscriptor.utils.key.midi_key_name returns it.
+    `markers` are (tick, text) pairs written into the conductor track, which is
+    where the chord chart goes.
     `offset_s` is recorded in a marker as the playback time at which the
     original audio starts (see BAR_OFFSET_MARKER).
 
@@ -328,13 +334,19 @@ def note_event2midi(
                 "time_signature", numerator=beats_per_bar, denominator=4, time=0
             )
         )
+    if key_signature is not None:
+        meta_track.append(MetaMessage("key_signature", key=key_signature, time=0))
     if offset_s:
         # Doesn't do anything for the MIDI but we just mark "we had to shift by this
         # much to align the bars". Read by /auralize later
         meta_track.append(
             MetaMessage("marker", text=f"{BAR_OFFSET_MARKER}{offset_s:.4f}", time=0)
         )
-    _append_tempo_changes(meta_track, tempo_changes, [])
+    _append_tempo_changes(
+        meta_track,
+        tempo_changes,
+        [(tick, MetaMessage("marker", text=text)) for tick, text in markers or []],
+    )
     midi.tracks.append(meta_track)
 
     drum_offset_events = []

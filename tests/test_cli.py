@@ -281,3 +281,144 @@ def test_a_bad_beat_scale_fails_before_transcribing(patched_model, fake_audio):
     assert result.exit_code == 1
     assert "power of two" in result.stderr
     assert _FakeModel.last_kwargs is None
+
+
+### --yt and the harmony flags
+
+
+def test_no_input_is_an_error(patched_model):
+    result = CliRunner().invoke(main_mod.app, ["transcribe"])
+    assert result.exit_code == 1
+    assert "no input" in result.stderr
+
+
+def test_a_file_and_a_url_are_exclusive(patched_model, fake_audio):
+    result = CliRunner().invoke(
+        main_mod.app, ["transcribe", str(fake_audio), "--yt", "https://example.com/x"]
+    )
+    assert result.exit_code == 1
+    assert "not both" in result.stderr
+
+
+def test_yt_without_yt_dlp_says_how_to_install_it(patched_model, monkeypatch):
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    result = CliRunner().invoke(
+        main_mod.app, ["transcribe", "--yt", "https://example.com/watch?v=abc"]
+    )
+    assert result.exit_code == 1
+    assert "yt-dlp" in result.stderr
+
+
+def test_yt_download_failure_is_reported(patched_model, monkeypatch):
+    import shutil
+    import subprocess
+
+    class _Failed:
+        returncode = 1
+        stderr = "ERROR: Video unavailable"
+
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/yt-dlp")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Failed())
+    result = CliRunner().invoke(
+        main_mod.app, ["transcribe", "--yt", "https://example.com/watch?v=abc"]
+    )
+    assert result.exit_code == 1
+    assert "Video unavailable" in result.stderr
+
+
+def test_yt_saves_next_to_the_cwd_not_in_the_temp_dir(
+    patched_model, fake_audio, tmp_path, monkeypatch
+):
+    """The download is temporary, so the default output must not go with it."""
+    monkeypatch.setattr(main_mod, "_download_audio", lambda _url: fake_audio)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        main_mod.app, ["transcribe", "--yt", "https://youtu.be/dQw4w9WgXcQ"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert (tmp_path / "dQw4w9WgXcQ.mid").exists()
+
+
+def test_default_output_stem_is_filesystem_safe():
+    stem = main_mod._default_output_stem
+    assert stem("https://youtu.be/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert stem("https://www.youtube.com/watch?v=abc123&t=30") == "watch"
+    assert stem("https://example.com/") == "example.com"
+    assert stem("https://example.com/clip%20one") == "clip_20one"
+
+
+def test_harmony_flags_need_a_midi_output(patched_model, fake_audio):
+    result = CliRunner().invoke(
+        main_mod.app,
+        ["transcribe", str(fake_audio), "-f", "json", "--detect-key"],
+    )
+    assert result.exit_code == 1
+    assert "--format midi" in result.stderr
+
+
+def test_detect_flags_reach_the_export_options(patched_model, fake_audio, tmp_path):
+    out = tmp_path / "out.mid"
+    result = CliRunner().invoke(
+        main_mod.app,
+        [
+            "transcribe",
+            str(fake_audio),
+            "-o",
+            str(out),
+            "--detect-key",
+            "--detect-chords",
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    export = _FakeModel.last_kwargs["export"]
+    assert export.detect_key is True
+    assert export.detect_chords is True
+    assert _FakeModel.last_kwargs["harmony"] is not None
+
+
+def test_chords_file_implies_detect_chords(patched_model, fake_audio, tmp_path):
+    out = tmp_path / "out.mid"
+    result = CliRunner().invoke(
+        main_mod.app,
+        [
+            "transcribe",
+            str(fake_audio),
+            "-o",
+            str(out),
+            "--chords-file",
+            str(tmp_path / "c.txt"),
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert _FakeModel.last_kwargs["export"].detect_chords is True
+
+
+def test_runs_without_harmony_leave_it_alone(patched_model, fake_audio, tmp_path):
+    result = CliRunner().invoke(
+        main_mod.app, ["transcribe", str(fake_audio), "-o", str(tmp_path / "out.mid")]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert _FakeModel.last_kwargs["harmony"] is None
+
+
+def test_report_harmony_prints_and_saves_the_chart(tmp_path, capsys):
+    from muscriptor.utils.midi import Harmony
+
+    harmony = Harmony(key=("C", "major"), chords=[(0.0, "C"), (4.0, "Am")])
+    chords_file = tmp_path / "chords.txt"
+    main_mod._report_harmony(harmony, chords_file, None)
+    captured = capsys.readouterr()
+    assert "Key: C major" in captured.err
+    assert "| C  | Am |" in captured.err
+    assert chords_file.read_text() == "| C  | Am |\n"
+
+
+def test_report_harmony_without_chords_saves_nothing(tmp_path, capsys):
+    from muscriptor.utils.midi import Harmony
+
+    chords_file = tmp_path / "chords.txt"
+    main_mod._report_harmony(Harmony(), chords_file, None)
+    assert capsys.readouterr().err == ""
+    assert not chords_file.exists()

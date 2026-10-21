@@ -52,7 +52,7 @@ from muscriptor.utils.beats import (
     detect_grid,
 )
 from muscriptor.utils.download import download_companion, download_if_necessary
-from muscriptor.utils.midi import ExportOptions, notes_to_midi, resolve_grid
+from muscriptor.utils.midi import ExportOptions, Harmony, notes_to_midi, resolve_grid
 
 
 @contextlib.contextmanager
@@ -631,6 +631,7 @@ class TranscriptionModel:
         prelude_forcing: bool = True,
         detect_tempo: TempoDetection = "best-effort",
         export: ExportOptions | None = None,
+        harmony: Harmony | None = None,
     ) -> tuple[bytes, BeatGrid | None]:
         """Same as :meth:`transcribe`, but as a MIDI file plus the grid it used.
 
@@ -644,6 +645,9 @@ class TranscriptionModel:
         music has to be engraved from and not what anyone wants to listen to;
         the returned grid's `beat_subdivision` says whether there was a
         subdivision to snap to at all.
+
+        `harmony`, when given, is filled in with the detected key and chords if
+        `export` asks for them (see :class:`muscriptor.utils.midi.Harmony`).
         """
         export = export or ExportOptions()
         beat_grid = self.detect_beat_grid_for(audio, detect_tempo)
@@ -664,7 +668,7 @@ class TranscriptionModel:
         if beat_grid is not None:
             beat_grid = beat_grid.with_onset_delay(onsets)
         midi_bytes = self.events_to_midi_bytes(
-            iter(events), beat_grid=beat_grid, export=export
+            iter(events), beat_grid=beat_grid, export=export, harmony=harmony
         )
         # The MIDI writer resolves the grid itself; this is the same one, for
         # the caller. resolve_grid must see the detected grid, not its own output.
@@ -706,6 +710,7 @@ class TranscriptionModel:
         events: Iterator[NoteStartEvent | NoteEndEvent | ProgressEvent],
         beat_grid: BeatGrid | None = None,
         export: ExportOptions | None = None,
+        harmony: Harmony | None = None,
     ) -> bytes:
         """Reassemble Notes from a NoteStart/NoteEnd stream and serialize MIDI.
 
@@ -716,6 +721,9 @@ class TranscriptionModel:
         `muscriptor.utils.midi.ExportOptions`); quantizing is what sheet music has
         to be engraved from and not what anyone wants to listen to. Call twice
         for both versions of the same transcription.
+
+        `harmony` is filled in with the detected key and chords when `export`
+        asks for them (see `muscriptor.utils.midi.Harmony`).
         """
         notes: list[Note] = []
         open_notes: dict[int, Note] = {}
@@ -749,7 +757,11 @@ class TranscriptionModel:
         notes = validate_notes(notes, fix=True)
         notes = trim_overlapping_notes(notes, sort=True)
         midi = notes_to_midi(
-            notes, program_names=program_names, beat_grid=beat_grid, options=export
+            notes,
+            program_names=program_names,
+            beat_grid=beat_grid,
+            options=export,
+            harmony=harmony,
         )
         buf = io.BytesIO()
         midi.save(file=buf)

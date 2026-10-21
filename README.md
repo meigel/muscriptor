@@ -80,6 +80,16 @@ uvx muscriptor transcribe path/to/audio_file.wav
 
 See `--help` for all the options.
 
+Instead of a file, you can transcribe a URL. This downloads the audio with
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) (install it separately), transcribes it, and deletes
+the download afterwards:
+
+```bash
+uvx muscriptor transcribe --yt https://youtu.be/… -o song.mid
+```
+
+Without `-o`, the transcription is written next to where you ran the command.
+
 ### Tempo and quantization
 
 The beats, time signature and bar lines are detected from the audio and written into the MIDI.
@@ -101,6 +111,27 @@ muscriptor transcribe audio.wav --bpm 96 --beats-per-bar 3 --first-downbeat 1.2 
 - `--beat-scale 2` (or `0.5`) when the detected tempo is half (or double) what it should be.
 
 The web UI has the same settings: the "Tempo & bars" panel and the MIDI download dialog.
+
+### Key and chords
+
+`--detect-key` estimates the musical key and writes it into the MIDI as a key signature.
+`--detect-chords` labels a chord per beat and writes the progression as markers in the
+conductor track, which DAWs and notation software show above the staff:
+
+```bash
+muscriptor transcribe audio.wav --detect-key --detect-chords --chords-file chords.txt
+```
+
+`--chords-file` saves the progression as a chord chart (and implies `--detect-chords`):
+
+```
+| C  | Am | F  | G  |
+```
+
+Both are read off the transcribed notes rather than the audio, so they are only as good as
+the transcription — a muddy mix gives wrong chords, and they are off by default. `--format
+sheets` engraves the score with the detected key signature. The web UI does not offer either
+yet.
 
 ### Sheet music
 

@@ -15,9 +15,10 @@ from muscriptor.tokenizer.mt3 import (
     resolve_instrument_names,
 )
 from muscriptor.transcription_model import TranscriptionModel
-from muscriptor.utils.beats import BeatDetectionError, TempoDetection
+from muscriptor.utils.beats import BeatDetectionError, BeatGrid, TempoDetection
+from muscriptor.utils.chords import chord_chart
 from muscriptor.utils.download import ModelDownloadError
-from muscriptor.utils.midi import ExportOptions
+from muscriptor.utils.midi import ExportOptions, Harmony
 from muscriptor.utils.sheets import (
     MuseScoreError,
     MuseScoreNotFoundError,
@@ -50,7 +51,13 @@ class OutputFormat(str, Enum):
     sheets = "sheets"
 
 
-def _transcribe(model, kwargs: dict, detect_tempo: str, export: ExportOptions):
+def _transcribe(
+    model,
+    kwargs: dict,
+    detect_tempo: str,
+    export: ExportOptions,
+    harmony: Harmony | None,
+):
     """transcribe_and_postprocess, with the CLI's --detect-tempo spelling and errors."""
     try:
         mode: TempoDetection = {
@@ -59,12 +66,88 @@ def _transcribe(model, kwargs: dict, detect_tempo: str, export: ExportOptions):
             "best-effort": "best-effort",
         }[detect_tempo]
         return model.transcribe_and_postprocess(
-            **kwargs, detect_tempo=mode, export=export
+            **kwargs, detect_tempo=mode, export=export, harmony=harmony
         )
     except BeatDetectionError as e:
         typer.echo(f"Error: {e}", err=True)
         typer.echo("Pass --detect-tempo best-effort or false to continue.", err=True)
         raise typer.Exit(1)
+
+
+def _download_audio(url: str) -> Path:
+    """Download `url`'s audio as a WAV in a temporary directory, deleted on exit.
+
+    Shells out to yt-dlp: it is the tool that keeps up with what the sites do to
+    break downloads, and an import of it here would make it a hard dependency of
+    every transcription. The directory is removed at exit so nothing is left
+    behind; pass -o to keep the result.
+    """
+    import atexit
+    import shutil
+    import subprocess
+    import tempfile
+
+    if shutil.which("yt-dlp") is None:
+        typer.echo(
+            "Error: --yt needs yt-dlp on PATH. Install it with "
+            "'uv tool install yt-dlp' or 'pipx install yt-dlp'.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    directory = Path(tempfile.mkdtemp(prefix="muscriptor_yt_"))
+    atexit.register(lambda d=directory: shutil.rmtree(d, ignore_errors=True))
+    typer.echo(f"Downloading audio from {url} …", err=True)
+    result = subprocess.run(
+        [
+            "yt-dlp",
+            "--extract-audio",
+            "--audio-format",
+            "wav",
+            "--no-playlist",
+            "--output",
+            str(directory / "audio.%(ext)s"),
+            url,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    downloaded = sorted(directory.glob("audio.*"))
+    if result.returncode != 0 or not downloaded:
+        typer.echo(f"Error: downloading {url} failed:\n{result.stderr}", err=True)
+        raise typer.Exit(1)
+    audio = downloaded[0]
+    typer.echo(
+        f"Downloaded {audio.name} ({audio.stat().st_size / 1024 / 1024:.1f} MiB)",
+        err=True,
+    )
+    return audio
+
+
+def _default_output_stem(url: str) -> str:
+    """A file name to save a URL's transcription under, from the URL itself."""
+    # The last path segment, e.g. https://youtu.be/dQw4w9WgXcQ -> dQw4w9WgXcQ.
+    stem = url.rstrip("/").rsplit("/", 1)[-1]
+    stem = stem.split("?")[0].split("&")[0]
+    allowed = "".join(c if c.isalnum() or c in "-_." else "_" for c in stem)
+    return allowed.strip("._") or "transcription"
+
+
+def _report_harmony(
+    harmony: Harmony, chords_file: Path | None, beat_grid: BeatGrid | None
+) -> None:
+    """Print the detected key and chord chart, and save the chart if asked to."""
+    if harmony.key is not None:
+        tonic, mode = harmony.key
+        typer.echo(f"Key: {tonic} {mode}", err=True)
+    if not harmony.chords:
+        return
+    beats_per_bar = (beat_grid.beats_per_bar if beat_grid else None) or 4
+    chart = chord_chart(harmony.chords, beats_per_bar)
+    typer.echo(chart, err=True)
+    if chords_file is not None:
+        chords_file.write_text(chart + "\n")
+        typer.echo(f"Saved chord chart to {chords_file}", err=True)
 
 
 def _event_to_dict(ev: NoteStartEvent | NoteEndEvent) -> dict:
@@ -80,8 +163,24 @@ def _event_to_dict(ev: NoteStartEvent | NoteEndEvent) -> dict:
 @app.command()
 def transcribe(
     audio_file: Annotated[
-        Path, typer.Argument(help="Input audio file (wav, mp3, flac, …)")
-    ],
+        Path | None,
+        typer.Argument(
+            help="Input audio file (wav, mp3, flac, …); omit it when using --yt"
+        ),
+    ] = None,
+    yt: Annotated[
+        str | None,
+        typer.Option(
+            "--yt",
+            "--youtube",
+            metavar="URL",
+            help=(
+                "Download the audio from a YouTube (or any yt-dlp supported) URL "
+                "instead of reading a file, then transcribe that. Needs yt-dlp on "
+                "PATH. The download is temporary unless you pass -o."
+            ),
+        ),
+    ] = None,
     output: Annotated[
         Path | None,
         typer.Option(
@@ -352,6 +451,41 @@ def transcribe(
             rich_help_panel="MIDI timing",
         ),
     ] = False,
+    detect_key: Annotated[
+        bool,
+        typer.Option(
+            "--detect-key/--no-detect-key",
+            help=(
+                "Detect the musical key from the transcribed notes and write it "
+                "as a key signature. Also printed to stderr."
+            ),
+            rich_help_panel="Harmony",
+        ),
+    ] = False,
+    detect_chords: Annotated[
+        bool,
+        typer.Option(
+            "--detect-chords/--no-detect-chords",
+            help=(
+                "Detect a chord per beat and write the progression as markers in "
+                "the MIDI's conductor track, where DAWs show them. Also printed "
+                "as a chord chart to stderr."
+            ),
+            rich_help_panel="Harmony",
+        ),
+    ] = False,
+    chords_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--chords-file",
+            metavar="PATH",
+            help=(
+                "Save the detected chord progression as a text chord chart. "
+                "Implies --detect-chords."
+            ),
+            rich_help_panel="Harmony",
+        ),
+    ] = None,
 ) -> None:
     """Transcribe an audio file to MIDI."""
     instrument_names: list[str] | None = None
@@ -368,8 +502,34 @@ def transcribe(
             raise typer.Exit(1)
         typer.echo(f"Instruments: {', '.join(instrument_names)}", err=True)
 
+    if yt is not None and audio_file is not None:
+        typer.echo("Error: pass either an audio file or --yt URL, not both.", err=True)
+        raise typer.Exit(1)
+    if yt is not None:
+        audio_file = _download_audio(yt)
+        # yt-dlp leaves the wav in a temporary directory that is deleted at
+        # exit, so the default output goes next to where the user ran us.
+        base_dir, base_stem = Path.cwd(), _default_output_stem(yt)
+    elif audio_file is None:
+        typer.echo(
+            "Error: no input. Pass an audio file, or --yt URL to download one.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    else:
+        base_dir, base_stem = audio_file.parent, audio_file.stem
+
     if not audio_file.exists():
         typer.echo(f"Error: file not found: {audio_file}", err=True)
+        raise typer.Exit(1)
+
+    wants_harmony = detect_key or detect_chords or chords_file is not None
+    if wants_harmony and format in (OutputFormat.json, OutputFormat.jsonl):
+        typer.echo(
+            "Error: --detect-key and --detect-chords write into the MIDI, so "
+            "they need --format midi or sheets.",
+            err=True,
+        )
         raise typer.Exit(1)
 
     if prelude_forcing and batch_size is not None and batch_size != 1:
@@ -385,14 +545,14 @@ def transcribe(
 
     if output is None:
         if format == OutputFormat.sheets:
-            output = audio_file.parent / f"{audio_file.stem}_sheets"
+            output = base_dir / f"{base_stem}_sheets"
         else:
             suffix = {
                 OutputFormat.midi: ".mid",
                 OutputFormat.json: ".json",
                 OutputFormat.jsonl: ".jsonl",
             }[format]
-            output = audio_file.with_suffix(suffix)
+            output = base_dir / f"{base_stem}{suffix}"
 
     if format == OutputFormat.sheets:
         if is_stdout:
@@ -426,10 +586,15 @@ def transcribe(
             strength=quantize_strength,
             fill_gaps=fill_gaps,
             trim_leading_bars=trim_leading_bars,
+            detect_key=detect_key,
+            detect_chords=detect_chords or chords_file is not None,
         )
     except ValueError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
+
+    # Filled in by the MIDI writer when the options above ask for it.
+    harmony = Harmony() if wants_harmony else None
 
     _device = None if device == "auto" else device
 
@@ -457,7 +622,9 @@ def transcribe(
     )
 
     if format == OutputFormat.sheets:
-        midi_bytes, beat_grid = _transcribe(model, kwargs, detect_tempo, export)
+        midi_bytes, beat_grid = _transcribe(
+            model, kwargs, detect_tempo, export, harmony
+        )
         typer.echo(f"Engraving sheet music with MuseScore → {output} …", err=True)
         try:
             written = write_sheets(
@@ -472,14 +639,20 @@ def transcribe(
         for path in written:
             typer.echo(f"  {path.name}", err=True)
         typer.echo(f"Saved {len(written)} files to {output}", err=True)
+        if harmony is not None:
+            _report_harmony(harmony, chords_file, beat_grid)
     elif format == OutputFormat.midi:
-        midi_bytes, _ = _transcribe(model, kwargs, detect_tempo, export)
+        midi_bytes, beat_grid = _transcribe(
+            model, kwargs, detect_tempo, export, harmony
+        )
         if is_stdout:
             sys.stdout.buffer.write(midi_bytes)
             sys.stdout.buffer.flush()
         else:
             output.write_bytes(midi_bytes)
             typer.echo(f"Saved MIDI to {output}", err=True)
+        if harmony is not None and not is_stdout:
+            _report_harmony(harmony, chords_file, beat_grid)
         if notes:
             typer.echo(
                 "Re-run with --format json to inspect the event stream.", err=True

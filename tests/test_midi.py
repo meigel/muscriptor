@@ -14,6 +14,8 @@ from muscriptor.utils.midi import (
     TEMPO_MAP_TOLERANCE,
     TICKS_PER_BEAT,
     ExportOptions,
+    Harmony,
+    beat_range,
     notes_to_midi,
 )
 
@@ -597,3 +599,132 @@ def test_smoothing_takes_the_trackers_frame_jitter_out_of_the_tempo():
 def test_beat_scale_must_be_a_power_of_two():
     with pytest.raises(ValueError):
         ExportOptions(beat_scale=3)
+
+
+### Key signatures and chord markers
+
+
+def _grid_120():
+    """120 BPM in 4/4 with a bar line on the first beat: one beat is 0.5 s."""
+    return BeatGrid(bpm=120, beats_per_bar=4, first_downbeat=0.0)
+
+
+def _chord(root, start, duration, quality=(0, 4, 7)):
+    return [
+        Note(
+            is_drum=False,
+            program=0,
+            onset=start,
+            offset=start + duration,
+            pitch=root + interval,
+        )
+        for interval in quality
+    ]
+
+
+def _meta_at(midi, msg_type):
+    """(absolute tick, message) for every `msg_type` in the conductor track."""
+    found = []
+    tick = 0
+    for msg in midi.tracks[0]:
+        tick += msg.time
+        if msg.type == msg_type:
+            found.append((tick, msg))
+    return found
+
+
+def _cadence(chords, beat_seconds=1.0, quality=(0, 4, 7)):
+    """`chords` (roots) one after another, each lasting `beat_seconds` seconds."""
+    notes = []
+    for index, root in enumerate(chords):
+        notes += _chord(root, index * beat_seconds, beat_seconds, quality)
+    return notes
+
+
+def test_detect_key_writes_a_key_signature():
+    # C - F - G - C: an unambiguous C major cadence.
+    notes = _cadence([60, 65, 67, 60])
+    harmony = Harmony()
+    midi = notes_to_midi(
+        notes,
+        beat_grid=_grid_120(),
+        options=ExportOptions(detect_key=True),
+        harmony=harmony,
+    )
+    assert harmony.key == ("C", "major")
+    assert [msg.key for _, msg in _meta_at(midi, "key_signature")] == ["C"]
+
+
+def test_detect_key_reports_a_minor_key_by_name():
+    # Am - Dm - E - Am: E's raised seventh points at A, not at C.
+    notes = _chord(57, 0.0, 1.0, quality=(0, 3, 7))
+    notes += _chord(62, 1.0, 1.0, quality=(0, 3, 7))
+    notes += _chord(64, 2.0, 1.0)
+    notes += _chord(57, 3.0, 1.0, quality=(0, 3, 7))
+    harmony = Harmony()
+    midi = notes_to_midi(
+        notes,
+        beat_grid=_grid_120(),
+        options=ExportOptions(detect_key=True),
+        harmony=harmony,
+    )
+    ((_, signature),) = _meta_at(midi, "key_signature")
+    assert signature.key == "Am"
+    assert harmony.key == ("A", "minor")
+
+
+def test_no_key_signature_unless_asked():
+    harmony = Harmony()
+    midi = notes_to_midi(_chord(60, 0.0, 1.0), beat_grid=_grid_120(), harmony=harmony)
+    assert _meta_at(midi, "key_signature") == []
+    assert _meta_at(midi, "marker") == []
+    assert harmony.key is None
+    assert harmony.chords == []
+
+
+def test_detect_chords_writes_markers_on_the_chord_changes():
+    notes = _chord(60, 0.0, 1.0) + _chord(65, 1.0, 1.0)  # C for two beats, F for two
+    harmony = Harmony()
+    midi = notes_to_midi(
+        notes,
+        beat_grid=_grid_120(),
+        options=ExportOptions(detect_chords=True),
+        harmony=harmony,
+    )
+    assert harmony.chords == [(0.0, "C"), (2.0, "F")]
+    assert [(tick, msg.text) for tick, msg in _meta_at(midi, "marker")] == [
+        (0, "C"),
+        (2 * TICKS_PER_BEAT, "F"),
+    ]
+
+
+def test_chord_markers_keep_the_bar_offset_marker():
+    """The chord chart must not push the /auralize marker out of the track."""
+    notes = _chord(60, 0.0, 1.0)
+    midi = notes_to_midi(
+        notes,
+        beat_grid=BeatGrid(bpm=120, beats_per_bar=4, first_downbeat=0.5),
+        options=ExportOptions(detect_chords=True),
+    )
+    assert read_bar_offset(midi) is not None
+    assert [msg.text for _, msg in _meta_at(midi, "marker")][0].startswith(
+        BAR_OFFSET_MARKER
+    )
+
+
+def test_harmony_chart_formats_the_progression():
+    harmony = Harmony(key=("C", "major"), chords=[(0.0, "C"), (4.0, "Am")])
+    assert harmony.chart == "| C  | Am |"
+
+
+def test_harmony_chart_without_chords():
+    assert Harmony().chart == "N.C."
+
+
+def test_beat_range_covers_whole_beats():
+    notes = [
+        Note(is_drum=False, program=0, onset=0.0, offset=0.25, pitch=60),
+        Note(is_drum=False, program=0, onset=1.0, offset=2.5, pitch=62),
+    ]
+    assert list(beat_range(notes)) == [0, 1, 2, 3]
+    assert list(beat_range([])) == []
